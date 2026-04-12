@@ -24,7 +24,7 @@ TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "ISI_TOKEN_KAMU_DI_SINI")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "ISI_CHAT_ID_KAMU_DI_SINI")
 
 SCAN_INTERVAL = 900       # Scan tiap 15 menit
-SYMBOL        = "XAUUSDT" # Pair Binance
+SYMBOL        = "BTCUSDT" # Pair Binance
 TIMEFRAME     = "15m"     # M15
 
 # Parameter indikator
