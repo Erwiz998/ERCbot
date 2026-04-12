@@ -28,7 +28,7 @@ TWELVE_DATA_KEY  = os.environ.get("TWELVE_DATA_KEY",  "ISI_API_KEY_TWELVEDATA")
 
 SCAN_INTERVAL = 300       # Scan tiap 5 menit
 SYMBOL        = "XAU/USD"
-TIMEFRAME     = "5min"    # ✅ M5 timeframe
+TIMEFRAME     = "15min"    # ✅ M5 timeframe
 CANDLE_LIMIT  = 250       # 250 candle M5 = ~20 jam data
 
 # Parameter indikator
@@ -42,7 +42,7 @@ BODY_MULT = 1.5   # Momentum: body > 1.5x rata-rata
 ATR_MULT  = 1.2   # ATR Breakout: range > 1.2x ATR
 RSI_OB    = 65.0
 RSI_OS    = 35.0
-MIN_ATR   = 0.3   # ✅ Lebih kecil karena M5 (volatilitas per candle lebih kecil)
+MIN_ATR   = 0.5   # ✅ Lebih kecil karena M5 (volatilitas per candle lebih kecil)
 SR_LOOK   = 100
 RR        = 2.0
 MARGIN    = 3
