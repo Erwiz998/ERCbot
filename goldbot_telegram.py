@@ -2,9 +2,9 @@
 """
 XAUUSD Gold Signal Bot — Telegram
 Data     : Twelve Data API (XAU/USD)
-Timeframe: M5 (5 menit)
+Timeframe: M15
 Scan     : Setiap 5 menit
-Sinyal   : 7 Kondisi Teknikal
+Update TG: Setiap 5 menit (sinyal atau status)
 ⚠️  Bot ini HANYA kirim SINYAL — tidak auto trade
 """
 
@@ -26,10 +26,10 @@ TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "ISI_TOKEN_TELEGRAM")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "ISI_CHAT_ID_TELEGRAM")
 TWELVE_DATA_KEY  = os.environ.get("TWELVE_DATA_KEY",  "ISI_API_KEY_TWELVEDATA")
 
-SCAN_INTERVAL = 300       # Scan tiap 5 menit
+SCAN_INTERVAL = 300       # Scan + update Telegram tiap 5 menit
 SYMBOL        = "XAU/USD"
-TIMEFRAME     = "15min"    # ✅ M5 timeframe
-CANDLE_LIMIT  = 250       # 250 candle M5 = ~20 jam data
+TIMEFRAME     = "15min"
+CANDLE_LIMIT  = 250
 
 # Parameter indikator
 EMA200    = 200
@@ -38,17 +38,17 @@ BB_P      = 20
 BB_DEV    = 2.0
 ATR_P     = 14
 RSI_P     = 14
-BODY_MULT = 1.5   # Momentum: body > 1.5x rata-rata
-ATR_MULT  = 1.2   # ATR Breakout: range > 1.2x ATR
+BODY_MULT = 1.5
+ATR_MULT  = 1.2
 RSI_OB    = 65.0
 RSI_OS    = 35.0
-MIN_ATR   = 0.5   # ✅ Lebih kecil karena M5 (volatilitas per candle lebih kecil)
+MIN_ATR   = 0.5
 SR_LOOK   = 100
 RR        = 2.0
 MARGIN    = 3
 LEVERAGE  = 50
 
-# Cooldown — hindari spam sinyal sama
+# Cooldown sinyal
 last_signal = {"direction": None, "price": 0.0}
 
 # ══════════════════════════════════════════════════════════════
@@ -90,7 +90,7 @@ def get_candles():
     return df
 
 # ══════════════════════════════════════════════════════════════
-# 📐  HITUNG SEMUA INDIKATOR
+# 📐  HITUNG INDIKATOR
 # ══════════════════════════════════════════════════════════════
 def compute_indicators(df):
     c = df["close"]
@@ -100,39 +100,34 @@ def compute_indicators(df):
 
     df["ema200"]   = c.ewm(span=EMA200, adjust=False).mean()
     df["ma99"]     = c.rolling(MA99).mean()
-
     df["bb_mid"]   = c.rolling(BB_P).mean()
     bb_std         = c.rolling(BB_P).std()
     df["bb_upper"] = df["bb_mid"] + BB_DEV * bb_std
     df["bb_lower"] = df["bb_mid"] - BB_DEV * bb_std
 
-    # ATR
-    tr           = pd.concat([
+    tr             = pd.concat([
         h - l,
         (h - c.shift()).abs(),
         (l - c.shift()).abs()
     ], axis=1).max(axis=1)
-    df["atr"]    = tr.rolling(ATR_P).mean()
+    df["atr"]      = tr.rolling(ATR_P).mean()
 
-    # RSI
-    delta        = c.diff()
-    gain         = delta.clip(lower=0).rolling(RSI_P).mean()
-    loss         = (-delta.clip(upper=0)).rolling(RSI_P).mean()
-    rs           = gain / loss.replace(0, np.nan)
-    df["rsi"]    = 100 - (100 / (1 + rs))
+    delta          = c.diff()
+    gain           = delta.clip(lower=0).rolling(RSI_P).mean()
+    loss           = (-delta.clip(upper=0)).rolling(RSI_P).mean()
+    rs             = gain / loss.replace(0, np.nan)
+    df["rsi"]      = 100 - (100 / (1 + rs))
 
-    # Momentum — rata-rata body 20 candle
-    df["body"]   = (c - o).abs()
-    df["body_ma"] = df["body"].rolling(20).mean()
-
+    df["body"]     = (c - o).abs()
+    df["body_ma"]  = df["body"].rolling(20).mean()
     return df
 
 # ══════════════════════════════════════════════════════════════
-# 🔍  CEK 7 KONDISI TEKNIKAL
+# 🔍  CEK 7 KONDISI
 # ══════════════════════════════════════════════════════════════
 def check_signal(df):
     df    = compute_indicators(df)
-    i     = -2  # Candle closed, bukan candle aktif
+    i     = -2
     row   = df.iloc[i]
     close = row["close"]
     open_ = row["open"]
@@ -141,47 +136,39 @@ def check_signal(df):
     atr   = row["atr"]
     r     = {}
 
-    # [1] Trend Alignment — EMA200
     r["trend_up"]   = close > row["ema200"]
     r["trend_down"] = close < row["ema200"]
 
-    # [2] Momentum Candle — body > 1.5x rata-rata body
     body          = abs(close - open_)
     r["momentum"] = (row["body_ma"] > 0) and (body >= row["body_ma"] * BODY_MULT)
 
-    # [3] Pinbar — ekor >= 2x body
     upper_sh      = high - max(close, open_)
     lower_sh      = min(close, open_) - low
     min_body      = atr * 0.05
     r["bull_pin"] = (body < min_body * 4) and (lower_sh >= body * 2) and (lower_sh > upper_sh)
     r["bear_pin"] = (body < min_body * 4) and (upper_sh >= body * 2) and (upper_sh > lower_sh)
 
-    # [4] Dynamic Wall — sentuh MA99 atau outer BB
     zone          = atr * 0.3
     r["dyn_wall"] = (abs(low  - row["ma99"])     < zone or
                      abs(high - row["ma99"])     < zone or
                      abs(high - row["bb_upper"]) < zone or
                      abs(low  - row["bb_lower"]) < zone)
 
-    # [5] Static S/R — swing high/low 100 candle terakhir
     lookback     = df.iloc[i - SR_LOOK : i]
     sr_high      = lookback["high"].max()
     sr_low       = lookback["low"].min()
     r["near_sr"] = (abs(close - sr_high) < atr * 0.5 or
                     abs(close - sr_low)  < atr * 0.5)
 
-    # [6] RSI Filter
     r["rsi_bull_ok"] = row["rsi"] < RSI_OB
     r["rsi_bear_ok"] = row["rsi"] > RSI_OS
 
-    # [7] ATR Breakout + Session Filter
     candle_range    = high - low
     r["atr_break"]  = candle_range >= atr * ATR_MULT
     r["atr_ok"]     = atr >= MIN_ATR
     h_wib           = datetime.now(pytz.timezone("Asia/Jakarta")).hour
     r["session_ok"] = (14 <= h_wib < 23) or (h_wib >= 20) or (h_wib < 5)
 
-    # ── KEPUTUSAN ─────────────────────────────────────────────
     long_ok  = (r["trend_up"]   and r["momentum"]  and r["bull_pin"] and
                 r["dyn_wall"]   and r["near_sr"]   and r["rsi_bull_ok"] and
                 r["atr_break"]  and r["atr_ok"]    and r["session_ok"])
@@ -208,9 +195,9 @@ def check_signal(df):
     }
 
 # ══════════════════════════════════════════════════════════════
-# 📨  FORMAT PESAN TELEGRAM
+# 📨  FORMAT PESAN SINYAL
 # ══════════════════════════════════════════════════════════════
-def format_message(sig):
+def format_signal(sig):
     price   = sig["price"]
     atr     = sig["atr"]
     sl_dist = atr * 1.5
@@ -244,7 +231,7 @@ def format_message(sig):
         f"{emoji} *XAUUSD SIGNAL — {grade}*\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🕐 {sig['time'].strftime('%d/%m %H:%M')} | Score: *{score}/7*\n"
-        f"⏱ TF: M5 | Data: Twelve Data\n"
+        f"⏱ TF: M15 | Data: Twelve Data\n"
         f"📍 Type: *{direction}*\n\n"
         f"💰 Entry  : `{price:.2f}`\n"
         f"🛑 SL     : `{sl:.2f}`\n"
@@ -256,19 +243,72 @@ def format_message(sig):
     )
 
 # ══════════════════════════════════════════════════════════════
-# 🚀  MAIN LOOP — scan tiap 5 menit
+# 📊  FORMAT PESAN STATUS (no signal)
+# ══════════════════════════════════════════════════════════════
+def format_status(sig):
+    r     = sig["r"]
+    h_wib = datetime.now(pytz.timezone("Asia/Jakarta")).hour
+
+    # Tentukan sesi
+    if 14 <= h_wib < 20:
+        sesi = "🟡 London"
+    elif h_wib >= 20 or h_wib < 5:
+        sesi = "🟢 New York"
+    elif 7 <= h_wib < 14:
+        sesi = "🟠 Asia"
+    else:
+        sesi = "🔴 Market Tutup"
+
+    # Bar progress score
+    filled = "█" * sig["score"]
+    empty  = "░" * (7 - sig["score"])
+    bar    = filled + empty
+
+    # Syarat yang belum terpenuhi
+    missing = []
+    if not (r.get("trend_up") or r.get("trend_down")):
+        missing.append("Trend")
+    if not r.get("momentum"):
+        missing.append("Momentum")
+    if not (r.get("bull_pin") or r.get("bear_pin")):
+        missing.append("Pinbar")
+    if not r.get("dyn_wall"):
+        missing.append("Dynamic Wall")
+    if not r.get("near_sr"):
+        missing.append("S/R")
+    if not (r.get("rsi_bull_ok") or r.get("rsi_bear_ok")):
+        missing.append("RSI")
+    if not (r.get("atr_break") and r.get("session_ok")):
+        missing.append("ATR/Session")
+
+    missing_str = ", ".join(missing) if missing else "—"
+
+    return (
+        f"📡 *XAUUSD — Scanning...*\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%d/%m %H:%M')} WIB\n"
+        f"💰 Harga : `{sig['price']:.2f}`\n"
+        f"📊 RSI   : `{sig['rsi']:.1f}`\n"
+        f"🌐 Sesi  : {sesi}\n\n"
+        f"Score: *{sig['score']}/7* `{bar}`\n"
+        f"❌ Belum: _{missing_str}_\n\n"
+        f"⏳ _Menunggu konfluensi lengkap..._"
+    )
+
+# ══════════════════════════════════════════════════════════════
+# 🚀  MAIN LOOP
 # ══════════════════════════════════════════════════════════════
 async def run_bot():
     global last_signal
     bot = Bot(token=TELEGRAM_TOKEN)
-    print(f"✅ GoldBot M5 aktif | Scan tiap {SCAN_INTERVAL//60} menit")
+    print(f"✅ GoldBot aktif | Update Telegram tiap {SCAN_INTERVAL//60} menit")
 
     await bot.send_message(
         chat_id=TELEGRAM_CHAT_ID,
         text=(
-            "🤖 *XAUUSD GoldBot v3.1 — AKTIF*\n"
+            "🤖 *XAUUSD GoldBot v3.2 — AKTIF*\n"
             "📡 Data: Twelve Data XAU/USD\n"
-            "⏱ Timeframe: M5 | Scan: 5 menit\n"
+            "⏱ TF: M15 | Update: tiap 5 menit\n"
             "📊 7 Kondisi Teknikal"
         ),
         parse_mode=ParseMode.MARKDOWN
@@ -277,7 +317,7 @@ async def run_bot():
     while True:
         try:
             now = datetime.now().strftime("%H:%M:%S")
-            print(f"[{now}] Scanning M5...")
+            print(f"[{now}] Scanning...")
 
             df  = get_candles()
             sig = check_signal(df)
@@ -290,7 +330,7 @@ async def run_bot():
                 if not is_same:
                     await bot.send_message(
                         chat_id=TELEGRAM_CHAT_ID,
-                        text=format_message(sig),
+                        text=format_signal(sig),
                         parse_mode=ParseMode.MARKDOWN
                     )
                     last_signal = {"direction": direction, "price": sig["price"]}
@@ -298,6 +338,12 @@ async def run_bot():
                 else:
                     print(f"⏭ Skip duplikat | {direction} | {sig['price']:.2f}")
             else:
+                # ✅ Kirim status ke Telegram tiap 5 menit walau no signal
+                await bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=format_status(sig),
+                    parse_mode=ParseMode.MARKDOWN
+                )
                 print(f"⏳ No signal | Score {sig['score']}/7 | RSI {sig['rsi']:.1f} | {sig['price']:.2f}")
 
         except Exception as e:
@@ -314,3 +360,4 @@ async def run_bot():
 
 if __name__ == "__main__":
     asyncio.run(run_bot())
+
