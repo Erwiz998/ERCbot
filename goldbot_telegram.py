@@ -227,8 +227,17 @@ def format_signal(sig):
         f"  • ATR+Session    : {'✅' if r['atr_break'] and r['session_ok'] else '❌'}"
     )
 
-    return (
-        f"{emoji} *XAUUSD SIGNAL — {grade}*\n"
+# Judul notif berdasarkan grade
+if grade == "A+":
+    notif_title = "🔥 GAS TRADE SEKARANG!"
+elif grade == "A":
+    notif_title = "⚡ SINYAL KUAT — SIAP ENTRY!"
+else:
+    notif_title = "⚠️ SINYAL MUNCUL — CEK DULU!"
+
+return (
+    f"{notif_title}\n"
+    f"{emoji} *XAUUSD SIGNAL — {grade}*\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🕐 {sig['time'].strftime('%d/%m %H:%M')} | Score: *{score}/7*\n"
         f"⏱ TF: M15 | Data: Twelve Data\n"
