@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-XAUUSD Gold Signal Bot — Telegram v3.3
-Data     : Twelve Data API (XAU/USD)
-Timeframe: M15
-Scan     : Setiap 5 menit
+XAUUSD Gold Signal Bot — Telegram v4.0
+Rules    : 5 Syarat Asli (Trend, Volume Anomaly, Pinbar, Dynamic Wall, Static S/R)
+Scan     : Tiap 5 menit (diam kalau tidak ada sinyal)
+Sinyal   : Hanya kirim kalau semua 5 syarat terpenuhi
 """
 
 import asyncio
@@ -24,26 +24,27 @@ TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "ISI_TOKEN_TELEGRAM")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "ISI_CHAT_ID_TELEGRAM")
 TWELVE_DATA_KEY  = os.environ.get("TWELVE_DATA_KEY",  "ISI_API_KEY_TWELVEDATA")
 
-SCAN_INTERVAL = 300
+SCAN_INTERVAL = 300       # Scan tiap 5 menit
 SYMBOL        = "XAU/USD"
 TIMEFRAME     = "15min"
 CANDLE_LIMIT  = 250
-EMA200        = 200
-MA99          = 99
-BB_P          = 20
-BB_DEV        = 2.0
-ATR_P         = 14
-RSI_P         = 14
-BODY_MULT     = 1.5
-ATR_MULT      = 1.2
-RSI_OB        = 65.0
-RSI_OS        = 35.0
-MIN_ATR       = 0.5
-SR_LOOK       = 100
-RR            = 2.0
-MARGIN        = 3
-LEVERAGE      = 50
 
+# ── Parameter Indikator ───────────────────────────────────────
+EMA200    = 200   # [1] Trend Alignment
+MA99      = 99    # [4] Dynamic Wall
+BB_P      = 20    # [4] Dynamic Wall (Bollinger)
+BB_DEV    = 2.0
+ATR_P     = 14
+RSI_P     = 14
+VOL_MULT  = 1.2   # [2] Volume Anomaly — lonjakan 1.2x MA20
+MA20_VOL  = 20
+SR_LOOK   = 100   # [5] Static S/R — 100 candle terakhir
+
+RR        = 2.0
+MARGIN    = 3
+LEVERAGE  = 50
+
+# Cooldown — hindari spam sinyal sama
 last_signal = {"direction": None, "price": 0.0}
 
 # ══════════════════════════════════════════════════════════════
@@ -69,11 +70,12 @@ def get_candles():
     rows = []
     for v in values:
         rows.append({
-            "time":  v["datetime"],
-            "open":  float(v["open"]),
-            "high":  float(v["high"]),
-            "low":   float(v["low"]),
-            "close": float(v["close"]),
+            "time":   v["datetime"],
+            "open":   float(v["open"]),
+            "high":   float(v["high"]),
+            "low":    float(v["low"]),
+            "close":  float(v["close"]),
+            "volume": float(v.get("volume", 1)),
         })
     df = pd.DataFrame(rows)
     df["time"] = pd.to_datetime(df["time"])
@@ -86,30 +88,39 @@ def compute_indicators(df):
     c = df["close"]
     h = df["high"]
     l = df["low"]
-    o = df["open"]
+    v = df["volume"]
 
+    # EMA200 — Trend
     df["ema200"]   = c.ewm(span=EMA200, adjust=False).mean()
+
+    # MA99 — Dynamic Wall
     df["ma99"]     = c.rolling(MA99).mean()
+
+    # Bollinger Bands — Dynamic Wall
     df["bb_mid"]   = c.rolling(BB_P).mean()
     bb_std         = c.rolling(BB_P).std()
     df["bb_upper"] = df["bb_mid"] + BB_DEV * bb_std
     df["bb_lower"] = df["bb_mid"] - BB_DEV * bb_std
-    tr             = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
+
+    # ATR
+    tr             = pd.concat([
+        h - l,
+        (h - c.shift()).abs(),
+        (l - c.shift()).abs()
+    ], axis=1).max(axis=1)
     df["atr"]      = tr.rolling(ATR_P).mean()
-    delta          = c.diff()
-    gain           = delta.clip(lower=0).rolling(RSI_P).mean()
-    loss           = (-delta.clip(upper=0)).rolling(RSI_P).mean()
-    df["rsi"]      = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
-    df["body"]     = (c - o).abs()
-    df["body_ma"]  = df["body"].rolling(20).mean()
+
+    # Volume MA20 — Volume Anomaly
+    df["vol_ma"]   = v.rolling(MA20_VOL).mean()
+
     return df
 
 # ══════════════════════════════════════════════════════════════
-# 🔍  CEK 7 KONDISI
+# 🔍  CEK 5 SYARAT ASLI
 # ══════════════════════════════════════════════════════════════
 def check_signal(df):
     df    = compute_indicators(df)
-    i     = -2
+    i     = -2  # Candle closed
     row   = df.iloc[i]
     close = row["close"]
     open_ = row["open"]
@@ -118,51 +129,65 @@ def check_signal(df):
     atr   = row["atr"]
     r     = {}
 
-    r["trend_up"]    = close > row["ema200"]
-    r["trend_down"]  = close < row["ema200"]
-    body             = abs(close - open_)
-    r["momentum"]    = (row["body_ma"] > 0) and (body >= row["body_ma"] * BODY_MULT)
-    upper_sh         = high - max(close, open_)
-    lower_sh         = min(close, open_) - low
-    min_body         = atr * 0.05
-    r["bull_pin"]    = (body < min_body*4) and (lower_sh >= body*2) and (lower_sh > upper_sh)
-    r["bear_pin"]    = (body < min_body*4) and (upper_sh >= body*2) and (upper_sh > lower_sh)
-    zone             = atr * 0.3
-    r["dyn_wall"]    = (abs(low-row["ma99"])<zone or abs(high-row["ma99"])<zone or
-                        abs(high-row["bb_upper"])<zone or abs(low-row["bb_lower"])<zone)
-    lookback         = df.iloc[i-SR_LOOK:i]
-    r["near_sr"]     = (abs(close-lookback["high"].max()) < atr*0.5 or
-                        abs(close-lookback["low"].min())  < atr*0.5)
-    r["rsi_bull_ok"] = row["rsi"] < RSI_OB
-    r["rsi_bear_ok"] = row["rsi"] > RSI_OS
-    candle_range     = high - low
-    r["atr_break"]   = candle_range >= atr * ATR_MULT
-    r["atr_ok"]      = atr >= MIN_ATR
-    h_wib            = datetime.now(pytz.timezone("Asia/Jakarta")).hour
-    r["session_ok"]  = (7 <= h_wib < 24) or (h_wib < 5)
+    # ─────────────────────────────────────────────────────────
+    # [1] TREND ALIGNMENT — Harga searah EMA200
+    # ─────────────────────────────────────────────────────────
+    r["trend_up"]   = close > row["ema200"]
+    r["trend_down"] = close < row["ema200"]
 
-    long_ok  = (r["trend_up"]  and r["momentum"] and r["bull_pin"] and r["dyn_wall"] and
-                r["near_sr"]   and r["rsi_bull_ok"] and r["atr_break"] and
-                r["atr_ok"]    and r["session_ok"])
-    short_ok = (r["trend_down"] and r["momentum"] and r["bear_pin"] and r["dyn_wall"] and
-                r["near_sr"]   and r["rsi_bear_ok"] and r["atr_break"] and
-                r["atr_ok"]    and r["session_ok"])
+    # ─────────────────────────────────────────────────────────
+    # [2] VOLUME ANOMALY — Lonjakan volume >= 1.2x MA20
+    # ─────────────────────────────────────────────────────────
+    r["vol_spike"]  = (row["vol_ma"] > 0) and (row["volume"] >= row["vol_ma"] * VOL_MULT)
+
+    # ─────────────────────────────────────────────────────────
+    # [3] PRICE REJECTION (PINBAR) — Ekor >= 2x body
+    # ─────────────────────────────────────────────────────────
+    body          = abs(close - open_)
+    upper_sh      = high - max(close, open_)
+    lower_sh      = min(close, open_) - low
+    min_body      = atr * 0.05
+    r["bull_pin"] = (body < min_body * 4) and (lower_sh >= body * 2) and (lower_sh > upper_sh)
+    r["bear_pin"] = (body < min_body * 4) and (upper_sh >= body * 2) and (upper_sh > lower_sh)
+
+    # ─────────────────────────────────────────────────────────
+    # [4] DYNAMIC WALLS — Sentuh MA99 atau outer Bollinger
+    # ─────────────────────────────────────────────────────────
+    zone          = atr * 0.3
+    r["dyn_wall"] = (abs(low  - row["ma99"])     < zone or
+                     abs(high - row["ma99"])     < zone or
+                     abs(high - row["bb_upper"]) < zone or
+                     abs(low  - row["bb_lower"]) < zone)
+
+    # ─────────────────────────────────────────────────────────
+    # [5] STATIC S/R — Swing high/low 100 candle terakhir
+    # ─────────────────────────────────────────────────────────
+    lookback     = df.iloc[i - SR_LOOK : i]
+    sr_high      = lookback["high"].max()
+    sr_low       = lookback["low"].min()
+    r["near_sr"] = (abs(close - sr_high) < atr * 0.5 or
+                    abs(close - sr_low)  < atr * 0.5)
+
+    # ── KEPUTUSAN ─────────────────────────────────────────────
+    long_ok  = (r["trend_up"]   and r["vol_spike"] and
+                r["bull_pin"]   and r["dyn_wall"]  and r["near_sr"])
+
+    short_ok = (r["trend_down"] and r["vol_spike"] and
+                r["bear_pin"]   and r["dyn_wall"]  and r["near_sr"])
 
     score = sum([
         r["trend_up"] or r["trend_down"],
-        r["momentum"],
+        r["vol_spike"],
         r["bull_pin"] or r["bear_pin"],
         r["dyn_wall"],
         r["near_sr"],
-        r["rsi_bull_ok"] or r["rsi_bear_ok"],
-        r["atr_break"] and r["atr_ok"] and r["session_ok"],
     ])
 
     return {
-        "long": long_ok, "short": short_ok,
-        "score": score,  "price": close,
-        "atr": atr,      "rsi": row["rsi"],
-        "r": r,          "time": df.iloc[i]["time"],
+        "long":  long_ok, "short": short_ok,
+        "score": score,   "price": close,
+        "atr":   atr,     "r":     r,
+        "time":  df.iloc[i]["time"],
     }
 
 # ══════════════════════════════════════════════════════════════
@@ -184,102 +209,45 @@ def format_signal(sig):
         sl = price + sl_dist
         tp = price - tp_dist
 
-    score = sig["score"]
-    grade = "A+" if score == 7 else "A" if score == 6 else "B+"
-    emoji = "🏆" if score == 7 else "✅" if score >= 6 else "⚠️"
-
-    # ✅ Judul notif — di dalam function, tidak error
-    if grade == "A+":
-        notif_title = "🔥 GAS TRADE SEKARANG!"
-    elif grade == "A":
-        notif_title = "⚡ SINYAL KUAT — SIAP ENTRY!"
-    else:
-        notif_title = "⚠️ SINYAL MUNCUL — CEK DULU!"
-
     cond = (
-        f"  • Trend EMA200   : {'✅' if r['trend_up'] or r['trend_down'] else '❌'}\n"
-        f"  • Momentum Candle: {'✅' if r['momentum'] else '❌'}\n"
-        f"  • Pinbar         : {'✅' if r['bull_pin'] or r['bear_pin'] else '❌'}\n"
-        f"  • Dynamic Wall   : {'✅' if r['dyn_wall'] else '❌'}\n"
-        f"  • Static S/R     : {'✅' if r['near_sr'] else '❌'}\n"
-        f"  • RSI Filter     : {'✅' if r['rsi_bull_ok'] or r['rsi_bear_ok'] else '❌'} ({sig['rsi']:.1f})\n"
-        f"  • ATR+Session    : {'✅' if r['atr_break'] and r['session_ok'] else '❌'}"
+        f"  • Trend EMA200  : {'✅' if r['trend_up'] or r['trend_down'] else '❌'}\n"
+        f"  • Volume Anomaly: {'✅' if r['vol_spike'] else '❌'}\n"
+        f"  • Pinbar        : {'✅' if r['bull_pin'] or r['bear_pin'] else '❌'}\n"
+        f"  • Dynamic Wall  : {'✅' if r['dyn_wall'] else '❌'}\n"
+        f"  • Static S/R    : {'✅' if r['near_sr'] else '❌'}"
     )
 
     return (
-        f"{notif_title}\n"
-        f"{emoji} *XAUUSD SIGNAL — {grade}*\n"
+        f"🔥 *GAS TRADE SEKARANG!*\n"
+        f"🏆 *XAUUSD SIGNAL — 5/5*\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 {sig['time'].strftime('%d/%m %H:%M')} | Score: *{score}/7*\n"
+        f"🕐 {sig['time'].strftime('%d/%m %H:%M')} WIB\n"
         f"⏱ TF: M15 | Data: Twelve Data\n"
         f"📍 Type: *{direction}*\n\n"
-        f"💰 Entry  : `{price:.2f}`\n"
-        f"🛑 SL     : `{sl:.2f}`\n"
-        f"🎯 TP     : `{tp:.2f}`\n"
-        f"📊 R:R    : 1:{RR}\n"
-        f"💼 Margin : ${MARGIN} × {LEVERAGE}x\n\n"
-        f"📋 *Kondisi:*\n{cond}\n\n"
+        f"💰 Entry : `{price:.2f}`\n"
+        f"🛑 SL    : `{sl:.2f}`\n"
+        f"🎯 TP    : `{tp:.2f}`\n"
+        f"📊 R:R   : 1:{RR}\n"
+        f"💼 Margin: ${MARGIN} × {LEVERAGE}x\n\n"
+        f"📋 *Konfirmasi:*\n{cond}\n\n"
         f"⚠️ _Bukan financial advice. Eksekusi manual di FBS._"
     )
 
 # ══════════════════════════════════════════════════════════════
-# 📊  FORMAT STATUS (no signal)
-# ══════════════════════════════════════════════════════════════
-def format_status(sig):
-    r     = sig["r"]
-    h_wib = datetime.now(pytz.timezone("Asia/Jakarta")).hour
-
-    if 7 <= h_wib < 14:
-        sesi = "🟠 Asia"
-    elif 14 <= h_wib < 20:
-        sesi = "🟡 London"
-    elif h_wib >= 20 or h_wib < 5:
-        sesi = "🟢 New York"
-    else:
-        sesi = "🔴 Market Tutup"
-
-    filled = "█" * sig["score"]
-    empty  = "░" * (7 - sig["score"])
-
-    missing = []
-    if not (r.get("trend_up") or r.get("trend_down")):  missing.append("Trend")
-    if not r.get("momentum"):                            missing.append("Momentum")
-    if not (r.get("bull_pin") or r.get("bear_pin")):    missing.append("Pinbar")
-    if not r.get("dyn_wall"):                            missing.append("Dynamic Wall")
-    if not r.get("near_sr"):                             missing.append("S/R")
-    if not (r.get("rsi_bull_ok") or r.get("rsi_bear_ok")): missing.append("RSI")
-    if not (r.get("atr_break") and r.get("session_ok")): missing.append("ATR/Session")
-
-    missing_str = ", ".join(missing) if missing else "—"
-
-    return (
-        f"📡 *XAUUSD — Scanning...*\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 {datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%d/%m %H:%M')} WIB\n"
-        f"💰 Harga : `{sig['price']:.2f}`\n"
-        f"📊 RSI   : `{sig['rsi']:.1f}`\n"
-        f"🌐 Sesi  : {sesi}\n\n"
-        f"Score: *{sig['score']}/7* `{filled}{empty}`\n"
-        f"❌ Belum: _{missing_str}_\n\n"
-        f"⏳ _Menunggu konfluensi lengkap..._"
-    )
-
-# ══════════════════════════════════════════════════════════════
-# 🚀  MAIN LOOP
+# 🚀  MAIN LOOP — scan tiap 5 menit, diam kalau tidak ada sinyal
 # ══════════════════════════════════════════════════════════════
 async def run_bot():
     global last_signal
     bot = Bot(token=TELEGRAM_TOKEN)
-    print(f"✅ GoldBot v3.3 aktif | Update tiap {SCAN_INTERVAL//60} menit")
+    print(f"✅ GoldBot v4.0 aktif | 5 Syarat Asli | Scan tiap {SCAN_INTERVAL//60} menit")
 
     await bot.send_message(
         chat_id=TELEGRAM_CHAT_ID,
         text=(
-            "🤖 *XAUUSD GoldBot v3.3 — AKTIF*\n"
-            "📡 Data: Twelve Data XAU/USD\n"
-            "⏱ TF: M15 | Update: tiap 5 menit\n"
-            "📊 7 Kondisi Teknikal\n"
-            "🔥 Notif otomatis saat sinyal muncul"
+            "🤖 *XAUUSD GoldBot v4.0 — AKTIF*\n"
+            "📡 Data: Twelve Data XAU/USD M15\n"
+            "📊 5 Syarat: Trend · Volume · Pinbar · DynWall · S/R\n"
+            "🔕 Bot hanya kirim pesan saat sinyal muncul"
         ),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -287,15 +255,13 @@ async def run_bot():
     while True:
         try:
             now = datetime.now().strftime("%H:%M:%S")
-            print(f"[{now}] Scanning...")
-
             df  = get_candles()
             sig = check_signal(df)
 
             if sig["long"] or sig["short"]:
                 direction  = "LONG" if sig["long"] else "SHORT"
                 price_diff = abs(sig["price"] - last_signal["price"])
-                is_same    = (last_signal["direction"] == direction and price_diff < 1.5)
+                is_same    = (last_signal["direction"] == direction and price_diff < 2.0)
 
                 if not is_same:
                     await bot.send_message(
@@ -304,16 +270,11 @@ async def run_bot():
                         parse_mode=ParseMode.MARKDOWN
                     )
                     last_signal = {"direction": direction, "price": sig["price"]}
-                    print(f"✅ Sinyal: {direction} | Score {sig['score']}/7 | {sig['price']:.2f}")
+                    print(f"[{now}] ✅ SINYAL: {direction} | Score 5/5 | {sig['price']:.2f}")
                 else:
-                    print(f"⏭ Skip duplikat | {direction} | {sig['price']:.2f}")
+                    print(f"[{now}] ⏭ Skip duplikat | {direction} | {sig['price']:.2f}")
             else:
-                await bot.send_message(
-                    chat_id=TELEGRAM_CHAT_ID,
-                    text=format_status(sig),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                print(f"⏳ No signal | Score {sig['score']}/7 | RSI {sig['rsi']:.1f} | {sig['price']:.2f}")
+                print(f"[{now}] ⏳ No signal | Score {sig['score']}/5 | {sig['price']:.2f}")
 
         except Exception as e:
             print(f"❌ Error: {e}")
